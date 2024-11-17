@@ -1,0 +1,598 @@
+---
+title: "Final Report"
+author: "STAT 412 | Serhat Habil Çelik"
+date: "6 May 2024"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+---
+# **Neccesary Packages**
+
+```{r,message=FALSE, warning=FALSE}
+library(agricolae)
+library(Boruta)
+library(car)
+library(caret)
+library(corrplot)
+library(data.table)
+library(dplyr)
+library(fastDummies)
+library(foreign)
+library(ggmosaic)
+library(ggplot2)
+library(glmnet)
+library(gridExtra)
+library(lattice)
+library(ltm)
+library(kableExtra)
+library(kernlab)
+library(MASS)
+library(mice)
+library(missForest)
+library(mltools)
+library(naniar)
+library(NeuralNetTools)
+library(nnet)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(stringr)
+library(tigerstats)
+library(VGAM)
+library(VIM)
+library(vcd)
+library(xgboost)
+```
+
+# **Reading Data**
+
+```{r,warning=FALSE, message=FALSE}
+setwd("C:/Users/Serhat/Desktop")
+data <- read.csv("Sleep.csv")
+```
+
+```{r}
+head(data,8)
+dim(data)
+```
+
+```{r}
+sum(is.na(data))
+```
+
+There is no NA in original data. We will create missing values in the next step.
+
+# **Data Cleaning**
+  
+```{r,warning=FALSE, message=FALSE}
+datanew <- data
+datanew <- datanew[,-1] 
+datanew$systolicpressure <- str_sub(datanew$Blood.Pressure,1,3)
+datanew$diastolicpressure <- str_sub(datanew$Blood.Pressure,5,7)
+datanew <- datanew[,-9]
+datanew[datanew$BMI.Category=="Normal Weight",]$BMI.Category="Normal"
+colnames(datanew) <- str_to_lower(colnames(datanew))
+newcol <- colnames(datanew)
+newcol <- gsub("\\.","",newcol)
+newcol[5] <- "sleepquality"
+newcol[6] <- "activitylevel"
+colnames(datanew) <- newcol
+datanew$gender <- as.factor(datanew$gender)
+datanew$occupation <- as.factor(datanew$occupation)
+datanew$bmicategory <- as.factor(datanew$bmicategory)
+datanew$sleepdisorder <- as.factor(datanew$sleepdisorder)
+datanew$systolicpressure <- as.numeric(datanew$systolicpressure)
+datanew$diastolicpressure <- as.numeric(datanew$diastolicpressure)
+colnames(datanew) 
+
+
+d <- data.frame(
+  Original_Data = colnames(data),
+  Cleaned_Data = colnames(datanew)
+)
+kable(d) %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(0, background = "lightblue", color = "black")
+```
+
+```{r}
+head(datanew)
+```
+
+# **Missingness**
+
+```{r}
+set.seed(412)
+datamiss <-  prodNA(datanew, noNA = 0.05)
+sum(is.na(datamiss))
+```
+
+There are 243 NA in the data now. We have taken the percentage of missingness as 0.05.
+
+# **EDA and CDA**
+
+Plots used in EDA was done with missing values; however ; CDA was done with imputted data here.
+```{r message=FALSE, warning=FALSE}
+set.seed(412)
+data.imp <- mice(datamiss,m=5,method = "pmm")
+data.comp <- complete(data.imp,action = "long")
+data.comp <- data.comp[,-c(1,2)]
+```
+
+```{r}
+summarynum <- datamiss %>%
+  select_if(is.numeric) %>%
+  summary()
+kable(summarynum)%>%
+ kable_styling(full_width = FALSE) %>%
+  row_spec(0, background = "lightblue", color = "black")
+```
+
+```{r}
+table(datamiss$gender)
+table(datamiss$bmicategory)
+```
+
+The number of male is higher than female. Furthermore, the number normal weight people is higher than the others.
+
+```{r}
+corrval <- round(cor(datamiss[, c(-1, -3, -8, -11)], use = "complete.obs"), 2)
+corrplot.mixed(corrval, lower = 'shade', upper = 'pie', order = 'alphabet',tl.cex=0.4)
+```
+
+When we look at the correlation plot of numeric variables in data, there is a perfect positive relationship between sleep duration and sleep quality. Also, there is a perfect positive relationship between systolic pressure and diastolic pressure. Lastly, there is a perfect negative relationship between stress level and sleep quality. They can cause multicollinearity for the data.
+
+<span style="color:darkblue">**Q1 - How do gender frequencies vary across different BMI Category?**</span> 
+
+```{r,warning=FALSE, message=FALSE}
+gender_bmi=table(datamiss$gender,datamiss$bmicategory)
+barplot(gender_bmi,main="Frequencies of Gender by BMI Category", xlab="BMI Category",
+        ylab="Frequency", beside=TRUE,col=c("dodgerblue3","deeppink3"))
+legend("topright", legend = c("Female", "Male"), fill = c("dodgerblue3", "deeppink3"),cex=0.65)
+
+chi_gen=table(data.comp$gender,data.comp$bmicategory)
+chichi <- chisq.test(chi_gen)
+chichi
+expected <- chichi$expected
+prop_above_5 <- sum(expected >= 5) / length(expected)
+prop_above_5
+```
+
+According to the Chi Square Test, since p value is smaller than α, there is a significant relationship between bmicategory and gender. For the plot, data with missing values were used, while for the Chi Square Test, imputed data was used for analysis here. Encoding data was not used here.
+
+<span style="color:darkblue">**Q2 - Do different BMI Categories shows a significantly different sleep duration?**</span> 
+
+```{r,warning=FALSE, message=FALSE}
+datamiss_nona <- na.omit(datamiss)
+ggplot(datamiss_nona, aes(x=sleepduration, y=age, fill=bmicategory)) +
+  geom_violin(trim = FALSE) +
+  labs(x = "Sleep Duration", y = "Age") +
+  ggtitle("Violin Plot of Sleep Duration by Age and BMI Category") +
+  facet_wrap(~bmicategory, scales = "free")
+
+# Box - Cox Transformation
+data.comp2 <- data.comp
+b <- boxcox(lm(data.comp2$sleepduration~1))
+lambda = b$x[which.max(b$y)]
+trnsfrmed_x = (data.comp2$sleepduration ^ lambda - 1) / lambda
+data.comp2$sleepduration <- trnsfrmed_x
+shapiro.test(data.comp2$sleepduration)
+
+# Best Normalize
+library(bestNormalize)
+best_x= bestNormalize(data.comp$sleepduration)
+best_xdata=predict(best_x, newdata = data.comp$sleepduration)  
+shapiro.test(best_xdata)
+
+# Scaling
+data.comp2$scale_sleepduration <- scale(data.comp2$sleepduration)
+shapiro.test(data.comp2$scale_sleepduration)
+
+# Homogeneity of Variance
+leveneTest(sleepduration ~ bmicategory, data=data.comp)
+
+anovabmi <- aov(sleepduration  ~ bmicategory, data = data.comp)
+tukeybmi <- HSD.test(anovabmi, "bmicategory", group = TRUE)
+print(tukeybmi)
+TukeyHSD(anovabmi)
+
+result = kruskal.test(sleepduration ~bmicategory,
+                    data = data.comp)
+print(result) 
+
+```
+
+Kruskal – Wallis rank sum test was applied for this question. This is because the data are not normally distributed despite all efforts to make it normal as shown in Table 6. According to the Kruska – Wallis rank sum test, there are significant differences between the treatment groups because p – value is less than 2.2e-16. Encoding data was not used here.
+
+<span style="color:darkblue">**Q3 - Is there a relationships between sleep disorder and bmi category when bounded by gender?**</span> 
+
+```{r,warning=FALSE, message=FALSE}
+mosaic( ~sleepdisorder + bmicategory, 
+        data = datamiss,
+        highlighting = "bmicategory", 
+        highlighting_fill = c("dodgerblue3", "deeppink3","green"),
+        direction = c("v", "h", "v"), 
+        main = "Mosaic-plot for BMI Category and Sleep Disorder",
+        gp_varnames = gpar(fontsize = 15, fontface = 1),
+        gp_labels = gpar(fontsize=5))
+chi_sleep=table(data.comp$sleepdisorder,data.comp$bmicategory)
+chisq.test(chi_sleep)
+```
+
+According to the Chi Square Test, since p value is smaller than 2.2e-16, there is a significant relationship between bmicategory and sleep disorder. For the plot, data with missing values were used, while for Chi Square Test, imputed data was used for analysis here. Encoding data was not used here.
+
+<span style="color:darkblue">**Q4 - Is there a relationship between heart rate and daily steps?**</span> 
+
+```{r}
+ggplot(datamiss, aes(x = heartrate, y = dailysteps)) +
+  geom_point(position = position_jitter(width = 1, height = 1)) + 
+  geom_smooth(method = "lm", se = FALSE) + 
+  labs(x = "Heart Rate", y = "Daily Steps") +
+  ggtitle("Correlation Between Heart Rate and Daily Steps")
+```
+
+There is a negatively significant relationship between heart rate and daily steps when looking at the plot. When heart rate increases, daily steps decrease sharply. For the plot, data with missing values were used here.
+
+<span style="color:darkblue">**Q5 - How systolic pressure and diastolic pressure differ in terms of BMI Category?**</span> 
+
+```{r}
+xyplot(systolicpressure ~ diastolicpressure | bmicategory  , data=data.comp , pch=20 , cex=1.5 ,xlab = "Diastolic Pressure",ylab = "Systolic Pressure",col="red")
+```
+
+According to the plot, there is no difference between systolic pressure and diastolic pressure in terms of BMI Category. They all have positive linear relationships. It is important that overweight and obese people have higher systolic pressure compared to normal weight people. Data with missing values was used for the plot.
+
+# **Insert Obese Into Overweight**
+
+```{r}
+datamiss1 <- datamiss
+datamiss1$bmicategory <- factor(datamiss1$bmicategory,
+                              levels = c("Normal", "Obese", "Overweight"),
+                              labels = c("Normal", "Overweight", "Overweight"))
+table(datamiss1$bmicategory)
+```
+
+# **Imputation**
+
+```{r,message=FALSE, warning=FALSE}
+set.seed(412)
+mice_plot = aggr(datamiss1, col=c('ivory','lightgreen'),
+                    numbers=TRUE, sortVars=TRUE, prop=FALSE,
+                    labels=names(datamiss1), cex.axis=.6,
+                    gap=3, ylab=c("Missing data","Pattern"))
+data.imp <- mice(datamiss1,m=5,method = "pmm")
+data.comp <- complete(data.imp,action = "long")
+data.comp <- data.comp[,-c(1,2)]
+number_of_missing <- data.frame(NonAvailableForMissingData = sum(is.na(datamiss1)), NonAvailableForImputedData = sum(is.na(data.comp)))
+number_of_missing
+
+numericc <- c("age", "sleepduration", "sleepquality", "activitylevel", "stresslevel", "heartrate", 
+              "dailysteps", "systolicpressure", "diastolicpressure")
+plots <- list()
+
+for (numcol in numericc) {
+  plot <- ggplot() +
+    geom_density(data = datamiss1, aes(x = .data[[numcol]], color = "Original Data")) + 
+    geom_density(data = data.comp, aes(x = .data[[numcol]], color = "Imputed Data")) + 
+    labs(title = paste("Density Plot for", numcol),
+         x = numcol,
+         y = "Density",
+         color = "Data Source") +
+    scale_color_manual(values = c("Original Data" = "red", "Imputed Data" = "black")) +
+    theme_minimal()
+  
+  plots[[numcol]] <- plot
+}
+
+do.call("grid.arrange", c(plots,ncol=2))
+
+data2 <- data.comp
+data2$bmicategory <- as.factor(data2$bmicategory)
+numeric_cols <- sapply(data2, is.numeric)
+data2_centered <- data2
+data2_centered[, numeric_cols] <- scale(data2_centered[, numeric_cols])
+```
+
+# **Label Encoding and Scaling**
+
+```{r,message=FALSE, warning=FALSE}
+datawithencoding <- data2_centered
+datawithencoding$bmicategory <- factor(data2_centered$bmicategory, levels = c("Normal", "Overweight"),labels = table(data2_centered$bmicategory))
+datawithencoding$bmicategory <- as.numeric(data2_centered$bmicategory)
+```
+
+# **Regularization**
+
+<span style="color:darkblue">**RIDGE REGRESSION**</span>
+
+```{r,message=FALSE, warning=FALSE}
+x=model.matrix(bmicategory~.,data=datawithencoding)[,-8]  
+y=as.matrix(datawithencoding[,"bmicategory"]) 
+grid=10^seq(10,-10,length =100)
+ridge=glmnet(x,y,alpha=0,lambda=grid,standardize = TRUE)
+cv_ridge = cv.glmnet(x, y, alpha = 0, lambda = grid)
+opt_lambda_ridge = cv_ridge$lambda.min
+ridge2=glmnet(x,y,alpha=0,lambda=opt_lambda_ridge,standardize = TRUE)  
+pred_ridge = predict(ridge2, s = opt_lambda_ridge, newx = x)
+rmse_ridge = sqrt(mean((pred_ridge - y)^2))
+```
+
+<span style="color:darkblue">**LASSO**</span>
+
+```{r,message=FALSE, warning=FALSE}
+x=model.matrix(bmicategory~.,data=datawithencoding)[,-8]  
+y=as.matrix(datawithencoding[,"bmicategory"]) 
+grid=10^seq(10,-10,length =100)
+lasso = glmnet(x,y,alpha =1, lambda=grid,standardize = TRUE)
+cv_lasso = cv.glmnet(x,y,alpha =1, lambda = grid)
+opt_lambda_lasso = cv_lasso$lambda.min
+lasso2=glmnet(x,y,alpha =1, lambda=opt_lambda_lasso,standardize = TRUE)
+pred_lasso= predict(lasso2, s = opt_lambda_lasso, newx = x)
+rmse_lasso= sqrt(mean((pred_lasso - y)^2))
+```
+
+<span style="color:darkblue">**ELASTIC NET**</span>
+
+```{r,message=FALSE, warning=FALSE}
+x=model.matrix(bmicategory~.,data=datawithencoding)[,-8]  
+y=as.matrix(datawithencoding[,"bmicategory"])
+grid=10^seq(10,-10,length =100)
+elast = glmnet (x,y,alpha =0.5, lambda =grid,standardize = TRUE)
+cv_elast =cv.glmnet (x,y,alpha =0.5, lambda = grid)
+opt_lambda_elast = cv_elast$lambda.min
+elast2 = glmnet(x, y, alpha = 0.5, lambda = opt_lambda_elast,standardize = TRUE) 
+pred_elast = predict(elast2, s = opt_lambda_elast, newx = x)
+rmse_elast = sqrt(mean((pred_elast - y)^2))
+```
+
+<span style="color:darkblue">**Assessing the Performance**</span>
+```{r}
+coefs=data.frame(as.matrix(coef(ridge2)),as.matrix(coef(lasso2)),as.matrix(coef(elast2)))
+colnames(coefs)=c("Ridge","Lasso","Elastic")
+coefs
+rmse_comp=data.frame(rmse_ridge,rmse_lasso,rmse_elast)
+colnames(rmse_comp)=c("Ridge","Lasso","Elastic")
+rownames(rmse_comp)="RMSE"
+rmse_comp
+```
+
+According to the RMSE results, Elastic Net is the best model because it has lower RMSE compared to others.
+
+# **Feature Engineering**
+
+<span style="color:darkblue">**LASSO**</span>
+
+```{r,message=FALSE, warning=FALSE}
+x=model.matrix(bmicategory~.,data=datawithencoding)[,-8]  
+y=as.matrix(datawithencoding[,"bmicategory"]) 
+grid=10^seq(10,-10,length =100)
+lasso=glmnet (x,y,alpha =1, lambda=grid)
+cv_lasso = cv.glmnet (x,y,alpha =1, lambda = grid)
+opt_lambda_lasso = cv_lasso$lambda.min
+lasso2=glmnet (x,y,alpha =1, lambda=opt_lambda_lasso)
+coef(lasso2)
+pred_lasso= predict(lasso2, s = opt_lambda_lasso, newx = x)
+rmse_lasso= sqrt(mean((pred_lasso - y)^2))
+rmse_lasso
+```
+
+<span style="color:darkblue">**BORUTA**</span>
+
+```{r,message=FALSE, warning=FALSE}
+boruta.train <- Boruta(bmicategory~., data = datawithencoding, doTrace = 2)
+print(boruta.train)
+model <- lm(bmicategory ~ ., data = datawithencoding)
+predictions <- predict(model, newdata = datawithencoding)
+rmse <- sqrt(mean((datawithencoding$bmicategory - predictions)^2))
+print(rmse) 
+```
+
+```{r}
+rmse_feature <- data.frame(LASSO=rmse_lasso,BORUTA=rmse)
+rmse_feature
+```
+
+LASSO and BORUTA feature selection methods were applied for the model. According to the LASSO, software engineer in occupation variable is needed to drop from the data. However, according to the BORUTA, all variables are significant. There is no need to remove any variable from the data. We consider the model with the lowest RMSE.
+
+# **Cross Validation**
+
+```{r,message=FALSE, warning=FALSE}
+# VALIDATION SET
+set.seed(412)
+train_data = datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train = datawithencoding[train_data,]
+test = datawithencoding[-train_data,]
+model <- lm(bmicategory ~ ., data = train)
+summary(model)
+pred = model %>%  predict(test)
+perf_metrics=data.frame(ValidationSet = RMSE(pred, test$bmicategory))
+perf_metrics
+
+# LOOCV
+set.seed(412)
+train.control = trainControl(method = "LOOCV") 
+model_loocv = train(bmicategory ~., data = datawithencoding, method = "lm", trControl = train.control)
+model_loocv$results[,2]
+
+# K-fold Cross Validation
+set.seed(412)
+train.control2 = trainControl(method = "repeatedcv", number = 10) 
+model_kfold = train(bmicategory~., data = datawithencoding, method = "lm",
+               trControl = train.control2)
+model_kfold$results[,2]
+
+# Repeated K-fold CV
+set.seed(412)
+train.control3 = trainControl(method = "repeatedcv", number = 10, repeats = 5) 
+model_rep_kfold = train(bmicategory ~., data = datawithencoding, method = "lm",
+               trControl = train.control3)
+model_rep_kfold$results[,2]
+rmse_values <- data.frame(ValidationSet=perf_metrics,LOOCV=model_loocv$results[,2],K_Fold=model_kfold$results[,2]
+,RepeatedK_fold=model_rep_kfold$results[,2])
+rownames(rmse_values)="RMSE"
+rmse_values
+```
+
+It is seen that Repeated K - Fold CV is the best technique because of its low root mean squared error compared to others. 
+
+# **Modelling**
+
+<span style="color:darkblue">**Logistic Regression**</span>
+```{r,message=FALSE, warning=FALSE}
+set.seed(412)
+train_data = datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train1 = datawithencoding[train_data,]
+test1 = datawithencoding[-train_data,]
+train1$bmicategory <- as.factor(train1$bmicategory)
+test1$bmicategory <- as.factor(test1$bmicategory)
+
+model1 <- train(bmicategory ~., data = train1, method = "glm", family = "binomial", trControl = train.control2)
+vif_values <- vif(model1$finalModel)
+vif_values
+model2 <- train(bmicategory ~. -gender -sleepduration -sleepquality - activitylevel - heartrate 
+                -systolicpressure - diastolicpressure, data = train1, method = "glm", family = "binomial", trControl = train.control2)
+predictions <- predict(model2, newdata = test1)
+conf_matrix <- confusionMatrix(predictions, test1$bmicategory)
+f1_score1 <- conf_matrix$byClass["F1"]
+accuracy1 <- conf_matrix$overall['Accuracy']
+print(paste("F1 Score of Logistic Regression:", f1_score1))
+print(paste("Accuracy of Logistic Regression:", accuracy1))
+```
+VIF of sleep duration, sleep quality, activity level, stress level, heart rate, systolic pressure and diastolic pressure are higher than 10, which is a threshold for VIF. K-Fold Cross Validation is used in logistic regression.
+
+
+<span style="color:darkblue">**Regularization**</span>
+```{r,message=FALSE, warning=FALSE}
+train_data2 = datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train2 = datawithencoding[train_data2,]
+test2 = datawithencoding[-train_data2,]
+train2$bmicategory <- as.factor(train2$bmicategory)
+test2$bmicategory <- as.factor(test2$bmicategory)
+levels(train2$bmicategory) <- c("Normal", "Overweight")
+levels(test2$bmicategory) <- c("Normal", "Overweight")
+model2 <- train(bmicategory ~ ., data = train2, method = "glmnet",family="binomial",trControl = train.control2, metric = "Accuracy",tuneGrid = expand.grid(alpha = c(0, 0.5, 1),lambda = seq(0.001, 0.1, by = 0.001)))
+model2$bestTune
+predictions2 <- predict(model2, newdata = test2)
+conf_matrix2 <- confusionMatrix(predictions2, test2$bmicategory)
+f1_score2<- conf_matrix2$byClass["F1"]
+accuracy2 <- conf_matrix2$overall['Accuracy']
+print(paste("Accuracy of Regularization:", accuracy2))
+print(paste("F1 Score of Regularization:", f1_score2))
+```
+According to the results, elastic net is the best model with lambda = 0.001. Its accuracy is 0.989, while its F1 score is 0.990. Hence, accuracy and F1 score are too high, which means that there is no overfitting. The model has efficaciously learned the patterns in the data.
+
+
+<span style="color:darkblue">**Random Forest**</span>
+```{r,message=FALSE, warning=FALSE}
+train_data3 = datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train3 = datawithencoding[train_data3,]
+test3 = datawithencoding[-train_data3,]
+train3$bmicategory <- as.factor(train3$bmicategory)
+test3$bmicategory <- as.factor(test3$bmicategory)
+levels(train3$bmicategory) <- c("Normal", "Overweight")
+levels(test3$bmicategory) <- c("Normal", "Overweight")
+model3 <- train(bmicategory ~ ., data = train3, method = "rf", trControl = train.control2,metric="F1")
+plot(model3)
+predictions3 <- predict(model3, newdata = test3)
+conf_matrix3 <- confusionMatrix(predictions3, test3$bmicategory)
+f1_score3 <- conf_matrix3$byClass["F1"]
+accuracy3 <- conf_matrix3$overall['Accuracy']
+print(paste("Accuracy of Random Forest:", accuracy3))
+print(paste("F1 Score of Random Forest:", f1_score3))
+
+```
+The best mtry parameter is found 12 by caret package in R.
+
+<span style="color:darkblue">**Neural Network**</span>
+```{r,message=FALSE, warning=FALSE}
+train_data4= datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train4= datawithencoding[train_data4,]
+test4 = datawithencoding[-train_data4,]
+train4$bmicategory <- as.factor(train4$bmicategory)
+test4$bmicategory <- as.factor(test4$bmicategory)
+levels(train4$bmicategory) <- c("Normal", "Overweight")
+levels(test4$bmicategory) <- c("Normal", "Overweight")
+model4 <- train(bmicategory~.,data=train4,method="nnet",trControl=train.control2,maxit=250)
+plotnet(model4$finalModel)
+model4$bestTune
+predictions4 <- predict(model4, newdata = test4)
+conf_matrix4 <- confusionMatrix(predictions4, test4$bmicategory)
+f1_score4 <- conf_matrix4$byClass["F1"]
+accuracy4 <- conf_matrix4$overall['Accuracy']
+print(paste("Accuracy of Neural Network:", accuracy4))
+print(paste("F1 Score of Neural Network:", f1_score4))
+```
+The best Tunes for the Neural Network are size 5 and decay 0.1 found by train function embedded in R.
+
+<span style="color:darkblue">**Support Vector Machines**</span>
+```{r,message=FALSE, warning=FALSE}
+train_data5= datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train5= datawithencoding[train_data5,]
+test5 = datawithencoding[-train_data5,]
+train5$bmicategory <- as.factor(train5$bmicategory)
+test5$bmicategory <- as.factor(test5$bmicategory)
+levels(train5$bmicategory) <- c("Normal", "Overweight")
+levels(test5$bmicategory) <- c("Normal", "Overweight")
+model5 <- train(bmicategory ~ .,             
+                   data = train5,                
+                   method = "svmLinear",       
+                   trControl = train.control2)
+
+predictions5 <- predict(model5, newdata = test5)
+conf_matrix5 <- confusionMatrix(predictions5, test5$bmicategory)
+f1_score5 <- conf_matrix5$byClass["F1"]
+accuracy5 <- conf_matrix5$overall['Accuracy']
+print(paste("Accuracy of Support Vector Machines:", accuracy5))
+print(paste("F1 Score of Support Vector Machines:", f1_score5))
+```
+Support Vector Machine (SVM) is a powerful and versatile machine learning algorithm primarily used for classification.
+SVM aims to find the best decision boundary that could maximize the margin between classes, thereby achieving a good generalization performance. Its accuracy is 0.9973 and its F1 Score is 0.9978.
+
+<span style="color:darkblue">**Naive Bayes**</span>
+```{r,message=FALSE, warning=FALSE}
+train_data6= datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train6= datawithencoding[train_data6,]
+test6 = datawithencoding[-train_data6,]
+train6$bmicategory <- as.factor(train6$bmicategory)
+test6$bmicategory <- as.factor(test6$bmicategory)
+levels(train6$bmicategory) <- c("Normal", "Overweight")
+levels(test6$bmicategory) <- c("Normal", "Overweight")
+model6 <- train(bmicategory ~ .,             
+                   data = train6,                
+                   method = "naive_bayes",       
+                   trControl = train.control2)
+
+predictions6 <- predict(model6, newdata = test6)
+conf_matrix6 <- confusionMatrix(predictions6, test6$bmicategory)
+f1_score6 <- conf_matrix6$byClass["F1"]
+accuracy6 <- conf_matrix6$overall['Accuracy']
+print(paste("Accuracy of Naive Bayes:", accuracy6))
+print(paste("F1 Score of Naive Bayes:", f1_score6))
+```
+K- Fold Cross Validation is as a cross-validation technique here.
+
+<span style="color:darkblue">**XGBoost**</span>
+```{r,message=FALSE, warning=FALSE}
+data2 <- within(datawithencoding, {
+  gender <- as.integer(gender) 
+  bmicategory <- as.integer(bmicategory)  
+  sleepdisorder <- as.integer(sleepdisorder)
+  occupation <- as.integer(occupation)})
+train_data7 = datawithencoding$bmicategory %>%
+  createDataPartition(p = 0.8, list = FALSE) 
+train7 = datawithencoding[train_data7,]
+test7 = datawithencoding[-train_data7,]
+model7 <- train(bmicategory ~ ., data = train7, method = "xgbTree", trControl = train.control2)
+model7$bestTune
+pred<-predict(model7,data=test7[,-8])
+test_xgb_mse<-mean((pred-test7[,8])^2)
+test_xgb_mse
+```
+K- Fold Cross Validation is used in XGBoost. Here, we cannot achieve MSE scores because it works with numeric values. Its MSE score is equal to 0.3937599.
+
